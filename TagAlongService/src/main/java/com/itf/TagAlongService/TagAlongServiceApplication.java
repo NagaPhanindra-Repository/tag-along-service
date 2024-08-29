@@ -9,5 +9,4 @@ public class TagAlongServiceApplication {
 	public static void main(String[] args) {
 		SpringApplication.run(TagAlongServiceApplication.class, args);
 	}
-
 }

@@ -10,6 +10,7 @@ import lombok.AllArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+@CrossOrigin(origins = "http://localhost:4200")
 @AllArgsConstructor
 @RestController
 @RequestMapping("/api/auth")
@@ -17,7 +18,6 @@ public class AuthenticationController {
 
     private AuthenticationService authenticationService;
 
-    // Build Login REST API
     @PostMapping("/login")
     public ResponseEntity<AuthenticationSuccessResponse> authenticate(@RequestBody LoginDto loginDto){
         String token = authenticationService.login(loginDto);
@@ -28,7 +28,6 @@ public class AuthenticationController {
         return ResponseEntity.ok(jwtAuthResponse);
     }
 
-    // Build Login REST API
     @PostMapping("/signin")
     public ResponseEntity<TagAlongUser> signIn(@RequestBody CreateUserDto createUserDto){
         TagAlongUser token = authenticationService.createUser(createUserDto);

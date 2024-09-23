@@ -57,9 +57,8 @@ public class SpringSecurityConfig {
                 .csrf()
                 .disable()
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .authorizeHttpRequests(auth ->
-                        auth.requestMatchers("/api/auth/**").permitAll()
-                                .requestMatchers("/api/test/**").permitAll()
+                .authorizeHttpRequests(request ->
+                        request.requestMatchers("/api/auth/**").permitAll()
                                 .anyRequest().authenticated()
                 );
 

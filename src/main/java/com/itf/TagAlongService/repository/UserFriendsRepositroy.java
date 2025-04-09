@@ -15,5 +15,11 @@ public interface UserFriendsRepositroy extends JpaRepository<UserFriendships, Lo
     List<UserFriendships> findByUserNameAndResponse(String userName, String response);
 
     @Query("select u from UserFriendships u where u.userName in( :userName) and u.followerName != :followerName")
-    List<UserFriendships> findPeopleYouMayKnow(List<String> userName, String followerName);
+    List<UserFriendships> findPeopleYouMayKnowUnique(List<String> userName, String followerName);
+
+    @Query("select u from UserFriendships u where u.userName in(  " +
+            "select uf.followerName from UserFriendships uf where uf.userName = :userName" +
+            ") and u.followerName != :userName and u.followerName not in (" +
+            "select uff.followerName from UserFriendships uff where uff.userName = :userName )")
+    List<UserFriendships> findPeopleYouMayKnow(String userName);
 }

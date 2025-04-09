@@ -39,8 +39,8 @@ public class UserFollowersController {
     @GetMapping("/{userName}")
     public ResponseEntity<List<UserFriendships>> getPeopleYouMayKnow(@PathVariable(value = "userName") String userName){
 
-        List<String> followerNames = userFriendsRepositroy.findByUserName(userName).stream().map(userFriendships -> userFriendships.getFollowerName()).toList();
-        List<UserFriendships> userFriendships = userFriendsRepositroy.findPeopleYouMayKnow(followerNames, userName);
+        //List<String> followerNames = userFriendsRepositroy.findByUserName(userName).stream().map(userFriendships -> userFriendships.getFollowerName()).toList();
+        List<UserFriendships> userFriendships = userFriendsRepositroy.findPeopleYouMayKnow(userName);
         return ResponseEntity.ok(userFriendships);
     }
 
@@ -67,7 +67,7 @@ public class UserFollowersController {
         if(userFollwerDto.getRequestType().equals("follow")){
             userFriendships.setFollowRequest(true);
         }
-        userFriendships.setResponse(null);
+        userFriendships.setResponse("R");
         userFriendships.setRequestedDateTime(LocalDateTime.now());
         return userFriendships;
     }

@@ -35,4 +35,16 @@ public class TagEventsController {
         List<String> friendsNames = friends.stream().map(friend -> friend.getFollowerName()).toList();
         return ResponseEntity.ok(eventRepository.findByUserNameIn(friendsNames));
     }
+
+    @PutMapping("/events/update")
+    public ResponseEntity<Event> updateEvent(@RequestBody Event event){
+        return ResponseEntity.ok( eventRepository.save(event));
+    }
+
+    @PostMapping("/events/create")
+    public ResponseEntity<Event> createEvent(@RequestBody Event event){
+        return ResponseEntity.ok( eventRepository.save(event));
+    }
+
+
 }

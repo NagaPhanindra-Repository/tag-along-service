@@ -21,12 +21,14 @@ import java.util.List;
 
 public class QrDetectionUtil {
 
-    private static final int DEFAULT_DPI = 400;
+    private static final int DEFAULT_DPI = 300;
     private static final int HIGH_DPI = 600;
-    private static final float DEFAULT_MARGIN_PTS = 150f;
-    private static final float LARGE_MARGIN_PTS = 250f;
-    private static final int VARIANT_PADDING_PX = 80;
-    private static final int EDGE_STRIP_PX = 260;
+    private static final int ULTRA_HIGH_DPI = 900;
+    private static final float DEFAULT_MARGIN_PTS = 200f;
+    private static final float LARGE_MARGIN_PTS = 300f;
+    private static final int VARIANT_PADDING_PX = 120;
+    private static final int EDGE_STRIP_WIDTH_PX = 400;
+    private static final double EDGE_UPSCALE_FACTOR = 3.0;
 
     /**
      * Detects all QR codes in a PDF file, including those outside the page box.
@@ -59,10 +61,19 @@ public class QrDetectionUtil {
                 if (results.size() == beforeCount) {
                     List<ResultWithOffset> edgeResults = decodeEdgeStrips(expandedImage);
                     for (ResultWithOffset edgeResult : edgeResults) {
-                        QrCodeData data = mapResultToPageCoordinates(
+                        float[] bounds = extractBounds(edgeResult.result);
+                        // Adjust coordinates if they came from an upscaled image
+                        float adjustedMinX = (float)(bounds[0] / edgeResult.scaleFactor) + edgeResult.offsetX;
+                        float adjustedMinY = (float)(bounds[1] / edgeResult.scaleFactor) + edgeResult.offsetY;
+                        float adjustedMaxX = (float)(bounds[2] / edgeResult.scaleFactor) + edgeResult.offsetX;
+                        float adjustedMaxY = (float)(bounds[3] / edgeResult.scaleFactor) + edgeResult.offsetY;
+
+                        QrCodeData data = mapBoundsToPageCoordinates(
+                                adjustedMinX,
+                                adjustedMinY,
+                                adjustedMaxX,
+                                adjustedMaxY,
                                 edgeResult.result,
-                                edgeResult.offsetX,
-                                edgeResult.offsetY,
                                 pageIndex,
                                 pageWidthPts,
                                 pageHeightPts,
@@ -80,6 +91,34 @@ public class QrDetectionUtil {
                     Result[] highDpiResults = decodeQrFromImage(highDpiImage);
                     for (Result result : highDpiResults) {
                         QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, HIGH_DPI, LARGE_MARGIN_PTS, counter++);
+                        addIfNotDuplicate(results, seen, data);
+                    }
+                }
+
+                // Pass 2b: ultra-high DPI on edge strips for tiny QR codes
+                if (results.size() == beforeCount) {
+                    BufferedImage ultraHighImage = renderPageWithMargin(renderer, page, pageIndex, ULTRA_HIGH_DPI, LARGE_MARGIN_PTS);
+                    List<ResultWithOffset> ultraEdgeResults = decodeEdgeStrips(ultraHighImage);
+                    for (ResultWithOffset edgeResult : ultraEdgeResults) {
+                        float[] bounds = extractBounds(edgeResult.result);
+                        float adjustedMinX = (float)(bounds[0] / edgeResult.scaleFactor) + edgeResult.offsetX;
+                        float adjustedMinY = (float)(bounds[1] / edgeResult.scaleFactor) + edgeResult.offsetY;
+                        float adjustedMaxX = (float)(bounds[2] / edgeResult.scaleFactor) + edgeResult.offsetX;
+                        float adjustedMaxY = (float)(bounds[3] / edgeResult.scaleFactor) + edgeResult.offsetY;
+
+                        QrCodeData data = mapBoundsToPageCoordinates(
+                                adjustedMinX,
+                                adjustedMinY,
+                                adjustedMaxX,
+                                adjustedMaxY,
+                                edgeResult.result,
+                                pageIndex,
+                                pageWidthPts,
+                                pageHeightPts,
+                                ULTRA_HIGH_DPI,
+                                LARGE_MARGIN_PTS,
+                                counter++
+                        );
                         addIfNotDuplicate(results, seen, data);
                     }
                 }
@@ -233,27 +272,56 @@ public class QrDetectionUtil {
         return out;
     }
 
+    /**
+     * Aggressively upscales an image for detecting very small QR codes.
+     */
+    private static BufferedImage upscaleImage(BufferedImage src, double factor) {
+        int w = (int) Math.round(src.getWidth() * factor);
+        int h = (int) Math.round(src.getHeight() * factor);
+        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.drawImage(src, 0, 0, w, h, null);
+        g.dispose();
+        return out;
+    }
+
     private static List<ResultWithOffset> decodeEdgeStrips(BufferedImage image) {
         List<ResultWithOffset> results = new ArrayList<>();
         int w = image.getWidth();
         int h = image.getHeight();
-        int strip = Math.min(Math.min(w, h) / 4, EDGE_STRIP_PX);
+        int strip = Math.min(Math.min(w, h) / 3, EDGE_STRIP_WIDTH_PX);
         if (strip <= 0) {
             return results;
         }
 
+        // Define edge strips: top, bottom, left, right
         Rectangle[] strips = new Rectangle[] {
-                new Rectangle(0, 0, w, strip),
-                new Rectangle(0, h - strip, w, strip),
-                new Rectangle(0, 0, strip, h),
-                new Rectangle(w - strip, 0, strip, h)
+                new Rectangle(0, 0, w, strip),                    // Top
+                new Rectangle(0, h - strip, w, strip),            // Bottom
+                new Rectangle(0, 0, strip, h),                    // Left
+                new Rectangle(w - strip, 0, strip, h)             // Right
         };
 
         for (Rectangle rect : strips) {
             BufferedImage sub = image.getSubimage(rect.x, rect.y, rect.width, rect.height);
+
+            // Try original edge strip first
             Result[] decoded = decodeQrFromImage(sub);
             for (Result r : decoded) {
                 results.add(new ResultWithOffset(r, rect.x, rect.y));
+            }
+
+            // If nothing found, upscale the edge strip aggressively for tiny QR codes
+            if (decoded.length == 0) {
+                BufferedImage upscaled = upscaleImage(sub, EDGE_UPSCALE_FACTOR);
+                Result[] upscaledResults = decodeQrFromImage(upscaled);
+                for (Result r : upscaledResults) {
+                    // Scale coordinates back down
+                    results.add(new ResultWithOffset(r, rect.x, rect.y, EDGE_UPSCALE_FACTOR));
+                }
             }
         }
         return results;
@@ -410,11 +478,20 @@ public class QrDetectionUtil {
         private final Result result;
         private final int offsetX;
         private final int offsetY;
+        private final double scaleFactor;
 
         private ResultWithOffset(Result result, int offsetX, int offsetY) {
             this.result = result;
             this.offsetX = offsetX;
             this.offsetY = offsetY;
+            this.scaleFactor = 1.0;
+        }
+
+        private ResultWithOffset(Result result, int offsetX, int offsetY, double scaleFactor) {
+            this.result = result;
+            this.offsetX = offsetX;
+            this.offsetY = offsetY;
+            this.scaleFactor = scaleFactor;
         }
     }
 }

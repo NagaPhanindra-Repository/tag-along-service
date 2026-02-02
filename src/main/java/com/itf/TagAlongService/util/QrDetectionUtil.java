@@ -26,7 +26,7 @@ public class QrDetectionUtil {
     private static final float DEFAULT_MARGIN_PTS = 150f;
     private static final float LARGE_MARGIN_PTS = 250f;
     private static final int VARIANT_PADDING_PX = 80;
-    private static final double VARIANT_SCALE = 2.0;
+    private static final int EDGE_STRIP_PX = 260;
 
     /**
      * Detects all QR codes in a PDF file, including those outside the page box.
@@ -53,6 +53,25 @@ public class QrDetectionUtil {
                 for (Result result : expandedResults) {
                     QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, DEFAULT_DPI, DEFAULT_MARGIN_PTS, counter++);
                     addIfNotDuplicate(results, seen, data);
+                }
+
+                // Pass 1b: edge-strip scan on the same render (fast, edge-friendly)
+                if (results.size() == beforeCount) {
+                    List<ResultWithOffset> edgeResults = decodeEdgeStrips(expandedImage);
+                    for (ResultWithOffset edgeResult : edgeResults) {
+                        QrCodeData data = mapResultToPageCoordinates(
+                                edgeResult.result,
+                                edgeResult.offsetX,
+                                edgeResult.offsetY,
+                                pageIndex,
+                                pageWidthPts,
+                                pageHeightPts,
+                                DEFAULT_DPI,
+                                DEFAULT_MARGIN_PTS,
+                                counter++
+                        );
+                        addIfNotDuplicate(results, seen, data);
+                    }
                 }
 
                 // Pass 2: only if nothing found on this page yet
@@ -102,7 +121,7 @@ public class QrDetectionUtil {
 
         BufferedImage image;
         try {
-            image = renderer.renderImageWithDPI(pageIndex, dpi, ImageType.RGB);
+            image = renderer.renderImageWithDPI(pageIndex, dpi, ImageType.GRAY);
         } finally {
             page.setMediaBox(origMedia);
             page.setCropBox(origCrop);
@@ -118,26 +137,21 @@ public class QrDetectionUtil {
             List<BufferedImage> variants = buildImageVariants(img);
 
             for (BufferedImage variant : variants) {
-                // Strategy 1: HybridBinarizer
                 Result[] r = tryDecode(variant, true, false);
                 if (r.length > 0) {
                     return r;
                 }
 
-                // Strategy 2: GlobalHistogramBinarizer
                 r = tryDecode(variant, false, false);
-                if (r.length > 0) {
-                    return r;
-                }
-
-                // Strategy 3: Inverted + HybridBinarizer
-                r = tryDecode(variant, true, true);
                 if (r.length > 0) {
                     return r;
                 }
             }
 
-            return new Result[0];
+            // Final fallback: inverted on padded (edge-friendly)
+            BufferedImage padded = addPadding(img, VARIANT_PADDING_PX);
+            Result[] inverted = tryDecode(padded, true, true);
+            return inverted.length > 0 ? inverted : new Result[0];
         } catch (Exception ex) {
             return new Result[0];
         }
@@ -203,16 +217,7 @@ public class QrDetectionUtil {
     private static List<BufferedImage> buildImageVariants(BufferedImage img) {
         List<BufferedImage> variants = new ArrayList<>();
         variants.add(img);
-
-        BufferedImage padded = addPadding(img, VARIANT_PADDING_PX);
-        variants.add(padded);
-
-        BufferedImage scaled2x = scaleImage(img, VARIANT_SCALE);
-        variants.add(scaled2x);
-
-        BufferedImage paddedScaled2x = addPadding(scaled2x, VARIANT_PADDING_PX);
-        variants.add(paddedScaled2x);
-
+        variants.add(addPadding(img, VARIANT_PADDING_PX));
         return variants;
     }
 
@@ -228,17 +233,44 @@ public class QrDetectionUtil {
         return out;
     }
 
-    private static BufferedImage scaleImage(BufferedImage src, double scale) {
-        int w = Math.max(1, (int) Math.round(src.getWidth() * scale));
-        int h = Math.max(1, (int) Math.round(src.getHeight() * scale));
-        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = out.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.drawImage(src, 0, 0, w, h, null);
-        g.dispose();
-        return out;
+    private static List<ResultWithOffset> decodeEdgeStrips(BufferedImage image) {
+        List<ResultWithOffset> results = new ArrayList<>();
+        int w = image.getWidth();
+        int h = image.getHeight();
+        int strip = Math.min(Math.min(w, h) / 4, EDGE_STRIP_PX);
+        if (strip <= 0) {
+            return results;
+        }
+
+        Rectangle[] strips = new Rectangle[] {
+                new Rectangle(0, 0, w, strip),
+                new Rectangle(0, h - strip, w, strip),
+                new Rectangle(0, 0, strip, h),
+                new Rectangle(w - strip, 0, strip, h)
+        };
+
+        for (Rectangle rect : strips) {
+            BufferedImage sub = image.getSubimage(rect.x, rect.y, rect.width, rect.height);
+            Result[] decoded = decodeQrFromImage(sub);
+            for (Result r : decoded) {
+                results.add(new ResultWithOffset(r, rect.x, rect.y));
+            }
+        }
+        return results;
+    }
+
+    private static float[] extractBounds(Result result) {
+        ResultPoint[] pts = result.getResultPoints();
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = Float.MIN_VALUE, maxY = Float.MIN_VALUE;
+        if (pts != null) {
+            for (ResultPoint rp : pts) {
+                minX = Math.min(minX, rp.getX());
+                maxX = Math.max(maxX, rp.getX());
+                minY = Math.min(minY, rp.getY());
+                maxY = Math.max(maxY, rp.getY());
+            }
+        }
+        return new float[] { minX, minY, maxX, maxY };
     }
 
     /**
@@ -275,18 +307,16 @@ public class QrDetectionUtil {
      * Maps a QR code result to page coordinates (normalized 0..1).
      */
     private static QrCodeData mapResultToPageCoordinates(Result result, int pageIndex, float pageWidthPts, float pageHeightPts, int dpi, float marginPts, int counter) {
-        ResultPoint[] pts = result.getResultPoints();
+        float[] bounds = extractBounds(result);
+        return mapBoundsToPageCoordinates(bounds[0], bounds[1], bounds[2], bounds[3], result, pageIndex, pageWidthPts, pageHeightPts, dpi, marginPts, counter);
+    }
 
-        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = Float.MIN_VALUE, maxY = Float.MIN_VALUE;
-        if (pts != null) {
-            for (ResultPoint rp : pts) {
-                if (rp.getX() < minX) minX = rp.getX();
-                if (rp.getX() > maxX) maxX = rp.getX();
-                if (rp.getY() < minY) minY = rp.getY();
-                if (rp.getY() > maxY) maxY = rp.getY();
-            }
-        }
+    private static QrCodeData mapResultToPageCoordinates(Result result, int offsetX, int offsetY, int pageIndex, float pageWidthPts, float pageHeightPts, int dpi, float marginPts, int counter) {
+        float[] bounds = extractBounds(result);
+        return mapBoundsToPageCoordinates(bounds[0] + offsetX, bounds[1] + offsetY, bounds[2] + offsetX, bounds[3] + offsetY, result, pageIndex, pageWidthPts, pageHeightPts, dpi, marginPts, counter);
+    }
 
+    private static QrCodeData mapBoundsToPageCoordinates(float minX, float minY, float maxX, float maxY, Result result, int pageIndex, float pageWidthPts, float pageHeightPts, int dpi, float marginPts, int counter) {
         double pxToPt = 72.0 / dpi;
         double minXPt = minX * pxToPt - marginPts;
         double maxXPt = maxX * pxToPt - marginPts;
@@ -309,7 +339,6 @@ public class QrDetectionUtil {
         data.setBottomX(rightNorm);
         data.setBottomY(bottomNorm);
         data.setOcrConfidence(1.0);
-
         return data;
     }
 
@@ -374,6 +403,18 @@ public class QrDetectionUtil {
                 round(data.getBottomX()) + "|" + round(data.getBottomY());
         if (seen.add(key)) {
             results.add(data);
+        }
+    }
+
+    private static class ResultWithOffset {
+        private final Result result;
+        private final int offsetX;
+        private final int offsetY;
+
+        private ResultWithOffset(Result result, int offsetX, int offsetY) {
+            this.result = result;
+            this.offsetX = offsetX;
+            this.offsetY = offsetY;
         }
     }
 }

@@ -25,6 +25,8 @@ public class QrDetectionUtil {
     private static final int HIGH_DPI = 600;
     private static final float DEFAULT_MARGIN_PTS = 150f;
     private static final float LARGE_MARGIN_PTS = 250f;
+    private static final int VARIANT_PADDING_PX = 80;
+    private static final double VARIANT_SCALE = 2.0;
 
     /**
      * Detects all QR codes in a PDF file, including those outside the page box.
@@ -36,42 +38,42 @@ public class QrDetectionUtil {
         int counter = 1;
 
         try (PDDocument doc = PDDocument.load(pdfStream)) {
+            PDFRenderer renderer = new PDFRenderer(doc);
             int pageCount = doc.getNumberOfPages();
 
             for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
                 PDPage page = doc.getPage(pageIndex);
                 float pageWidthPts = page.getMediaBox().getWidth();
                 float pageHeightPts = page.getMediaBox().getHeight();
+                int beforeCount = results.size();
 
-                int[] dpis = new int[]{DEFAULT_DPI, HIGH_DPI};
-                float[] margins = new float[]{DEFAULT_MARGIN_PTS, LARGE_MARGIN_PTS};
-
-                for (int dpi : dpis) {
-                    for (float margin : margins) {
-                        BufferedImage expandedImage = renderPageWithMargin(doc, pageIndex, dpi, margin);
-                        Result[] expandedResults = decodeQrFromImage(expandedImage);
-                        for (Result result : expandedResults) {
-                            QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, dpi, margin, counter++);
-                            addIfNotDuplicate(results, seen, data);
-                        }
-                    }
-                }
-
-                // Strategy 2: Try normal render if expanded didn't work
-                BufferedImage normalImage = renderPageNormal(doc, pageIndex, DEFAULT_DPI);
-                Result[] normalResults = decodeQrFromImage(normalImage);
-                for (Result result : normalResults) {
-                    QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, DEFAULT_DPI, 0, counter++);
+                // Pass 1: default dpi + default margin
+                BufferedImage expandedImage = renderPageWithMargin(renderer, page, pageIndex, DEFAULT_DPI, DEFAULT_MARGIN_PTS);
+                Result[] expandedResults = decodeQrFromImage(expandedImage);
+                for (Result result : expandedResults) {
+                    QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, DEFAULT_DPI, DEFAULT_MARGIN_PTS, counter++);
                     addIfNotDuplicate(results, seen, data);
                 }
 
-                // Strategy 3: Extract embedded images from page resources
-                List<BufferedImage> extractedImages = extractImagesFromPageResources(page);
-                for (BufferedImage img : extractedImages) {
-                    Result[] imgResults = decodeQrFromImage(img);
-                    for (Result result : imgResults) {
-                        QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, DEFAULT_DPI, 0, counter++);
+                // Pass 2: only if nothing found on this page yet
+                if (results.size() == beforeCount) {
+                    BufferedImage highDpiImage = renderPageWithMargin(renderer, page, pageIndex, HIGH_DPI, LARGE_MARGIN_PTS);
+                    Result[] highDpiResults = decodeQrFromImage(highDpiImage);
+                    for (Result result : highDpiResults) {
+                        QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, HIGH_DPI, LARGE_MARGIN_PTS, counter++);
                         addIfNotDuplicate(results, seen, data);
+                    }
+                }
+
+                // Pass 3: only if still nothing found, try embedded images
+                if (results.size() == beforeCount) {
+                    List<BufferedImage> extractedImages = extractImagesFromPageResources(page);
+                    for (BufferedImage img : extractedImages) {
+                        Result[] imgResults = decodeQrFromImage(img);
+                        for (Result result : imgResults) {
+                            QrCodeData data = mapResultToPageCoordinates(result, pageIndex, pageWidthPts, pageHeightPts, DEFAULT_DPI, 0, counter++);
+                            addIfNotDuplicate(results, seen, data);
+                        }
                     }
                 }
             }
@@ -84,9 +86,7 @@ public class QrDetectionUtil {
      * Renders a page after temporarily expanding its MediaBox and CropBox.
      * This allows detection of content drawn outside the original page boundaries.
      */
-    private static BufferedImage renderPageWithMargin(PDDocument doc, int pageIndex, int dpi, float marginPts) throws Exception {
-        PDPage page = doc.getPage(pageIndex);
-
+    private static BufferedImage renderPageWithMargin(PDFRenderer renderer, PDPage page, int pageIndex, int dpi, float marginPts) throws Exception {
         PDRectangle origMedia = page.getMediaBox();
         PDRectangle origCrop = page.getCropBox();
 
@@ -100,7 +100,6 @@ public class QrDetectionUtil {
         page.setMediaBox(expanded);
         page.setCropBox(expanded);
 
-        PDFRenderer renderer = new PDFRenderer(doc);
         BufferedImage image;
         try {
             image = renderer.renderImageWithDPI(pageIndex, dpi, ImageType.RGB);
@@ -112,55 +111,46 @@ public class QrDetectionUtil {
     }
 
     /**
-     * Renders a page normally without margin expansion.
-     */
-    private static BufferedImage renderPageNormal(PDDocument doc, int pageIndex, int dpi) throws Exception {
-        PDFRenderer renderer = new PDFRenderer(doc);
-        return renderer.renderImageWithDPI(pageIndex, dpi, ImageType.RGB);
-    }
-
-    /**
      * Attempts to decode QR codes from a BufferedImage using multiple strategies.
      */
     private static Result[] decodeQrFromImage(BufferedImage img) {
         try {
-            List<Result> results = new ArrayList<>();
             List<BufferedImage> variants = buildImageVariants(img);
 
             for (BufferedImage variant : variants) {
                 // Strategy 1: HybridBinarizer
-                try {
-                    var src = new BufferedImageLuminanceSource(variant);
-                    var bitmap = new BinaryBitmap(new HybridBinarizer(src));
-                    Result[] r = decodeMultipleWithFallback(bitmap);
-                    Collections.addAll(results, r);
-                } catch (Exception ex) {
-                    // Continue to next strategy
+                Result[] r = tryDecode(variant, true, false);
+                if (r.length > 0) {
+                    return r;
                 }
 
                 // Strategy 2: GlobalHistogramBinarizer
-                try {
-                    var src = new BufferedImageLuminanceSource(variant);
-                    var bitmap = new BinaryBitmap(new GlobalHistogramBinarizer(src));
-                    Result[] r = decodeMultipleWithFallback(bitmap);
-                    Collections.addAll(results, r);
-                } catch (Exception ex) {
-                    // Continue to next strategy
+                r = tryDecode(variant, false, false);
+                if (r.length > 0) {
+                    return r;
                 }
 
                 // Strategy 3: Inverted + HybridBinarizer
-                try {
-                    BufferedImage inverted = invert(variant);
-                    var src = new BufferedImageLuminanceSource(inverted);
-                    var bitmap = new BinaryBitmap(new HybridBinarizer(src));
-                    Result[] r = decodeMultipleWithFallback(bitmap);
-                    Collections.addAll(results, r);
-                } catch (Exception ex) {
-                    // Continue
+                r = tryDecode(variant, true, true);
+                if (r.length > 0) {
+                    return r;
                 }
             }
 
-            return results.toArray(new Result[0]);
+            return new Result[0];
+        } catch (Exception ex) {
+            return new Result[0];
+        }
+    }
+
+    private static Result[] tryDecode(BufferedImage variant, boolean hybrid, boolean invertFirst) {
+        try {
+            BufferedImage working = invertFirst ? invert(variant) : variant;
+            var src = new BufferedImageLuminanceSource(working);
+            BinaryBitmap bitmap = hybrid
+                    ? new BinaryBitmap(new HybridBinarizer(src))
+                    : new BinaryBitmap(new GlobalHistogramBinarizer(src));
+            return decodeMultipleWithFallback(bitmap);
         } catch (Exception ex) {
             return new Result[0];
         }
@@ -210,10 +200,51 @@ public class QrDetectionUtil {
         return inv;
     }
 
+    private static List<BufferedImage> buildImageVariants(BufferedImage img) {
+        List<BufferedImage> variants = new ArrayList<>();
+        variants.add(img);
+
+        BufferedImage padded = addPadding(img, VARIANT_PADDING_PX);
+        variants.add(padded);
+
+        BufferedImage scaled2x = scaleImage(img, VARIANT_SCALE);
+        variants.add(scaled2x);
+
+        BufferedImage paddedScaled2x = addPadding(scaled2x, VARIANT_PADDING_PX);
+        variants.add(paddedScaled2x);
+
+        return variants;
+    }
+
+    private static BufferedImage addPadding(BufferedImage src, int pad) {
+        int w = src.getWidth() + pad * 2;
+        int h = src.getHeight() + pad * 2;
+        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        g.setColor(Color.WHITE);
+        g.fillRect(0, 0, w, h);
+        g.drawImage(src, pad, pad, null);
+        g.dispose();
+        return out;
+    }
+
+    private static BufferedImage scaleImage(BufferedImage src, double scale) {
+        int w = Math.max(1, (int) Math.round(src.getWidth() * scale));
+        int h = Math.max(1, (int) Math.round(src.getHeight() * scale));
+        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.drawImage(src, 0, 0, w, h, null);
+        g.dispose();
+        return out;
+    }
+
     /**
      * Recursively extracts images from page resources (including form XObjects).
      */
-    private static List<BufferedImage> extractImagesFromPageResources(PDPage page) throws Exception {
+    private static List<BufferedImage> extractImagesFromPageResources(PDPage page) {
         List<BufferedImage> images = new ArrayList<>();
         PDResources resources = page.getResources();
         if (resources != null) {
@@ -222,7 +253,7 @@ public class QrDetectionUtil {
         return images;
     }
 
-    private static void extractImagesFromResources(PDResources resources, List<BufferedImage> out) throws Exception {
+    private static void extractImagesFromResources(PDResources resources, List<BufferedImage> out) {
         if (resources == null) return;
         for (COSName name : resources.getXObjectNames()) {
             try {
@@ -262,10 +293,10 @@ public class QrDetectionUtil {
         double minYPt = minY * pxToPt - marginPts;
         double maxYPt = maxY * pxToPt - marginPts;
 
-        double leftNorm = clamp(round(minXPt / pageWidthPts), 0.0, 1.0);
-        double rightNorm = clamp(round(maxXPt / pageWidthPts), 0.0, 1.0);
-        double topNorm = clamp(round(1.0 - (maxYPt / pageHeightPts)), 0.0, 1.0);
-        double bottomNorm = clamp(round(1.0 - (minYPt / pageHeightPts)), 0.0, 1.0);
+        double leftNorm = clamp01(round(minXPt / pageWidthPts));
+        double rightNorm = clamp01(round(maxXPt / pageWidthPts));
+        double topNorm = clamp01(round(1.0 - (maxYPt / pageHeightPts)));
+        double bottomNorm = clamp01(round(1.0 - (minYPt / pageHeightPts)));
 
         QrCodeData data = new QrCodeData();
         data.setFieldId("Barcode_" + counter);
@@ -286,8 +317,8 @@ public class QrDetectionUtil {
         return Math.round(v * 1_000_000d) / 1_000_000d;
     }
 
-    private static double clamp(double v, double min, double max) {
-        return Math.max(min, Math.min(max, v));
+    private static double clamp01(double v) {
+        return Math.max(0.0, Math.min(1.0, v));
     }
 
     /**
@@ -336,55 +367,13 @@ public class QrDetectionUtil {
         public double getOcrConfidence() { return ocrConfidence; }
         public void setOcrConfidence(double ocrConfidence) { this.ocrConfidence = ocrConfidence; }
     }
-    private static List<BufferedImage> buildImageVariants(BufferedImage img) {
-        List<BufferedImage> variants = new ArrayList<>();
-        variants.add(img);
 
-        BufferedImage padded = addPadding(img, 80);
-        variants.add(padded);
-
-        BufferedImage scaled2x = scaleImage(img, 2.0);
-        variants.add(scaled2x);
-
-        BufferedImage paddedScaled2x = addPadding(scaled2x, 80);
-        variants.add(paddedScaled2x);
-
-        return variants;
-    }
-
-    private static BufferedImage addPadding(BufferedImage src, int pad) {
-        int w = src.getWidth() + pad * 2;
-        int h = src.getHeight() + pad * 2;
-        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = out.createGraphics();
-        g.setColor(Color.WHITE);
-        g.fillRect(0, 0, w, h);
-        g.drawImage(src, pad, pad, null);
-        g.dispose();
-        return out;
-    }
-
-    private static BufferedImage scaleImage(BufferedImage src, double scale) {
-        int w = Math.max(1, (int) Math.round(src.getWidth() * scale));
-        int h = Math.max(1, (int) Math.round(src.getHeight() * scale));
-        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = out.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.drawImage(src, 0, 0, w, h, null);
-        g.dispose();
-        return out;
-    }
-
-    private static boolean addIfNotDuplicate(List<QrCodeData> results, Set<String> seen, QrCodeData data) {
+    private static void addIfNotDuplicate(List<QrCodeData> results, Set<String> seen, QrCodeData data) {
         String key = data.getPageNumber() + "|" + data.getFieldValue() + "|" +
                 round(data.getTopX()) + "|" + round(data.getTopY()) + "|" +
                 round(data.getBottomX()) + "|" + round(data.getBottomY());
         if (seen.add(key)) {
             results.add(data);
-            return true;
         }
-        return false;
     }
 }
